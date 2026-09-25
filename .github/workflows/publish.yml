@@ -1,0 +1,83 @@
+name: Refresh and publish Daily Music Scan
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      refresh:
+        description: Fetch KKBOX, Apple Music, Spotify and YouTube charts
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: daily-music-pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Import initial project uploaded through GitHub
+        if: hashFiles('source-bootstrap.tar.gz') != ''
+        run: |
+          tar -xzf source-bootstrap.tar.gz
+          rm source-bootstrap.tar.gz
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git commit -m 'Import verified Daily Music Scan source project'
+          git push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Refresh public charts
+        if: github.event_name == 'workflow_dispatch' && inputs.refresh
+        id: refresh
+        continue-on-error: true
+        run: python scripts/refresh-music.py
+      - name: Create one frozen observation per week
+        if: github.event_name == 'workflow_dispatch' && inputs.refresh
+        run: node scripts/create-weekly.mjs
+      - name: Validate source data and transformations
+        run: |
+          python scripts/refresh-music.py --validate-only
+          python -m unittest discover -s tests -p 'test_*.py'
+          node --test tests/*.test.mjs
+      - name: Save verified refresh and explicit failure states
+        if: github.event_name == 'workflow_dispatch' && inputs.refresh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/data.json snapshots/ issues/
+          if ! git diff --cached --quiet; then
+            git commit -m 'Update verified music chart snapshots'
+            git push
+          fi
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+      - name: Note partial refresh
+        if: steps.refresh.outcome == 'failure'
+        run: echo '::warning::At least one source failed. Last successful records and explicit failure status were preserved.'
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
